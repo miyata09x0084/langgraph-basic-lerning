@@ -3,3 +3,6 @@ langchain
 langchain-anthropic
 langchain-openai
 python-dotenv
+ipython
+pygraphviz
+pillow
