@@ -1,11 +1,13 @@
 import os
 from langchain.chat_models import init_chat_model
 from langchain_tavily import TavilySearch
+from langchain_core.tools import tool
 from typing import Annotated
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command, Interrupt, interrupt
 from dotenv import load_dotenv
 from IPython.display import Image, display
 from tool_node import BasicToolNode
@@ -33,10 +35,6 @@ tavily_api_key = get_required_api_key("TAVILY_API_KEY")
 os.environ["OPENAI_API_KEY"] = api_key
 os.environ["TAVILY_API_KEY"] = tavily_api_key
 
-# Initialize tools (after API keys are set)
-tool = TavilySearch(max_results=2)
-tools = [tool]
-
 # Initialize the LLM
 llm = init_chat_model(
     model="openai:gpt-4o-mini",
@@ -44,6 +42,16 @@ llm = init_chat_model(
     api_key=api_key
 )
 
+@tool
+def human_assistance(query: str) -> str:
+    """Request human assistance."""
+    human_response = interrupt({"query": query})
+    return human_response["data"]
+
+# Initialize tools (after API keys are set)
+tavily_tool = TavilySearch(max_results=2)
+tools = [tavily_tool, human_assistance]
+llm_with_tools = llm.bind_tools(tools)
 
 def route_tools(state: State):
     """
@@ -63,14 +71,13 @@ def route_tools(state: State):
 
 # Build the graph
 graph_builder = StateGraph(State)
-llm_with_tools = llm.bind_tools(tools)
 
 def chatbot(state: State):
     return {"messages": [llm_with_tools.invoke(state["messages"])]}
 
 graph_builder.add_node("chatbot", chatbot)
 
-tool_node = BasicToolNode(tools=[tool])
+tool_node = BasicToolNode(tools=tools)
 graph_builder.add_node("tools", tool_node)
 
 # The `tools_condition` function returns "tools" if the chatbot asks to use a tool, and "END" if
@@ -128,7 +135,10 @@ def stream_graph_updates(user_input: str, config: dict):
         config,
         stream_mode="values",
     ):
-        print("Assistant: ", event["messages"][-1].content)
+        # Only print non-empty assistant messages
+        content = event["messages"][-1].content
+        if content:
+            print("Assistant:", content)
 
 # Main interaction loop
 if __name__ == "__main__":
@@ -145,7 +155,10 @@ if __name__ == "__main__":
             
             # 会話後の状態確認
             snapshot = graph.get_state(config)
-            print("State after conversation:", snapshot)
+            print("\nState after conversation:")
+            from pprint import pprint
+            pprint(snapshot)
+            print()
         except:
             # fallback if input() is not available
             user_input = "What do you know about langgraph?"
