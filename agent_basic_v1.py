@@ -7,10 +7,14 @@ from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import Command, Interrupt, interrupt
+from langgraph.types import Command
+try:
+    from langgraph.types import interrupt
+except ImportError:
+    from langgraph.utils import interrupt
 from dotenv import load_dotenv
 from IPython.display import Image, display
-from tool_node import BasicToolNode
+from langgraph.prebuilt import ToolNode, tools_condition
 
 class State(TypedDict):
     # Messages have the type "list". The `add_messages` function
@@ -44,9 +48,9 @@ llm = init_chat_model(
 
 @tool
 def human_assistance(query: str) -> str:
-    """Request human assistance."""
-    human_response = interrupt({"query": query})
-    return human_response["data"]
+    """Request assistance from a human."""
+    # This is a placeholder - actual interrupt happens in dedicated node
+    return f"Human assistance requested for: {query}"
 
 # Initialize tools (after API keys are set)
 tavily_tool = TavilySearch(max_results=2)
@@ -73,24 +77,23 @@ def route_tools(state: State):
 graph_builder = StateGraph(State)
 
 def chatbot(state: State):
-    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+    message = llm_with_tools.invoke(state["messages"])
+    # Because we will be interrupting during tool execution,
+    # we disable parallel tool calling to avoid repeating any
+    # tool invocations when we resume.
+    assert len(message.tool_calls) <= 1
+    return {"messages": [message]}
 
 graph_builder.add_node("chatbot", chatbot)
 
-tool_node = BasicToolNode(tools=tools)
+tool_node = ToolNode(tools=tools)
 graph_builder.add_node("tools", tool_node)
 
 # The `tools_condition` function returns "tools" if the chatbot asks to use a tool, and "END" if
 # it is fine directly responding. This conditional routing defines the main agent loop.
 graph_builder.add_conditional_edges(
     "chatbot",
-    route_tools,
-    # The following dictionary lets you tell the graph to interpret the condition's outputs as a specific node
-    # It defaults to the identity function, but if you
-    # want to use a node named something else apart from "tools",
-    # You can update the value of the dictionary to something else
-    # e.g., "tools": "my_tools"
-    {"tools": "tools", END: END},
+    tools_condition,
 )
 # Any time a tool is called, we return to the chatbot to decide the next step
 graph_builder.add_edge("tools", "chatbot")
@@ -140,31 +143,45 @@ def stream_graph_updates(user_input: str, config: dict):
         if content:
             print("Assistant:", content)
 
-# Main interaction loop
+# Main interaction loop - following official tutorial
 if __name__ == "__main__":
-    # Configuration for conversation thread
-    config = {"configurable": {"thread_id": "6"}}
+    # Step 4: Prompt the chatbot
+    user_input = "I need some expert guidance for building an AI agent. Could you request assistance for me?"
+    config = {"configurable": {"thread_id": "1"}}
     
-    while True:
-        try:
-            user_input = input("User: ")
-            if user_input.lower() in ["exit", "quit", "q"]:
-                print("Goodbye!")
-                break
-            stream_graph_updates(user_input, config)
-            
-            # 会話後の状態確認
-            snapshot = graph.get_state(config)
-            print("\nState after conversation:")
-            from pprint import pprint
-            pprint(snapshot)
-            print()
-        except:
-            # fallback if input() is not available
-            user_input = "What do you know about langgraph?"
-            print("User: " + user_input)
-            stream_graph_updates(user_input, config)
-            break
+    print("=== Initial Request ===")
+    events = graph.stream(
+        {"messages": [{"role": "user", "content": user_input}]},
+        config,
+        stream_mode="values",
+    )
+    for event in events:
+        if "messages" in event:
+            event["messages"][-1].pretty_print()
+    
+    # Check if execution was interrupted
+    snapshot = graph.get_state(config)
+    print(f"\nNext node: {snapshot.next}")
+    
+    if snapshot.interrupts:
+        print("\n=== Human Assistance Requested ===")
+        for interrupt in snapshot.interrupts:
+            if isinstance(interrupt.value, dict) and 'query' in interrupt.value:
+                print(f"Query: {interrupt.value['query']}")
+        
+        # Step 5: Resume execution
+        print("\n=== Resuming with Expert Response ===")
+        human_response = (
+            "We, the experts are here to help! We'd recommend you check out LangGraph to build your agent."
+            " It's much more reliable and extensible than simple autonomous agents."
+        )
+        
+        human_command = Command(resume={"data": human_response})
+        
+        events = graph.stream(human_command, config, stream_mode="values")
+        for event in events:
+            if "messages" in event:
+                event["messages"][-1].pretty_print()
 
 
 
